@@ -1,5 +1,6 @@
 require('dotenv').config();
 const pool = require("./utils/db");
+const couponRoutes = require("./routes/couponRoutes");
 
 pool
   .query("SELECT NOW()")
@@ -14,6 +15,7 @@ app.use(express.json());
 const trackRoutes = require('./routes/trackRoutes');
 app.use('/track', trackRoutes);
 
+app.use("/claim-coupon", couponRoutes);
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
