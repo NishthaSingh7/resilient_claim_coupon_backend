@@ -160,7 +160,7 @@ The system prioritizes user experience by ensuring that redirect logic is never 
 
 ---
 
-## Demo
+## Part 1 - Demo Video
 
 https://drive.google.com/file/d/18FaRdvfEExZTlDoY681Wkmsxln4PgSMc/view?usp=sharing
 
@@ -419,4 +419,250 @@ There is no overselling because each transaction sees a consistent state due to 
 * Row-level locking ensures concurrency safety
 
 The system guarantees that coupon issuance remains consistent and within limits even under high concurrency.
+
+## Part 2 - Demo Video
+
+https://drive.google.com/file/d/1Gh30a1rwEjJE4M_3Jy1XD2TUs3l0UFZz/view?usp=sharing
+
+# Part 3 — Order Placement and Attribution
+
+## Requirements
+
+Endpoint:
+
+```http
+POST /order
+Body: { userId, offerId, couponCode, amount }
+```
+
+The system must:
+
+* Validate that the coupon exists, belongs to the user, and is unused
+* Mark the coupon as used
+* Create an order with full attribution
+* Notify an external analytics system via webhook
+
+Webhook:
+
+```http
+POST https://analytics.partner.com/conversion
+Body: { orderId, offerId, amount }
+```
+
+---
+
+## Design Priorities
+
+* Coupon update and order creation must be atomic
+* Webhook must be outside the transaction so it does not interfere with DB operations
+* System must handle failures reliably
+* Webhook delivery must be eventually consistent
+
+---
+
+## Approach
+
+* Use a database transaction for coupon validation, update, and order creation
+* Store webhook events in a `webhook_events` table (outbox pattern)
+* Execute webhook calls after transaction commit
+* Retry failed webhook events using a background process (demo: localhost JSON server on port 4000)
+
+---
+
+## Schema
+
+### Orders Table
+
+```sql
+CREATE TABLE orders (
+    id UUID PRIMARY KEY,
+    user_id UUID REFERENCES users(id),
+    offer_id UUID REFERENCES offers(id),
+    coupon_id UUID REFERENCES coupons(id),
+    amount DECIMAL NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+### Webhook Events Table
+
+```sql
+CREATE TABLE webhook_events (
+    id UUID PRIMARY KEY,
+    order_id UUID REFERENCES orders(id),
+    status TEXT CHECK (status IN ('PENDING', 'SUCCESS', 'FAILED')) DEFAULT 'PENDING',
+    retry_count INT DEFAULT 0,
+    last_attempt_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+
+    CONSTRAINT unique_order_event UNIQUE (order_id)
+);
+```
+
+---
+
+### Coupons Table (Update)
+
+```sql
+ALTER TABLE coupons
+ADD COLUMN is_used BOOLEAN DEFAULT FALSE;
+```
+
+---
+
+## Endpoint Implementation
+
+```js
+// (same code as provided — unchanged)
+```
+
+---
+
+## Webhook Service
+
+```js
+// (same code as provided — unchanged)
+```
+
+---
+
+## Retry Mechanism
+
+* Failed webhook events are stored in `webhook_events`
+* A background process retries events with `status = FAILED`
+* Retry attempts are limited using `retry_count`
+* In this implementation, retries are demonstrated using a localhost JSON server
+
+---
+
+## Key Design Decisions
+
+### 1. Atomic Transactions
+
+* Coupon update and order creation occur in a single transaction
+* Ensures consistency and prevents partial updates
+
+---
+
+### 2. Row-Level Locking
+
+* Prevents concurrent usage of the same coupon
+* Ensures correct validation under concurrency
+
+---
+
+### 3. Webhook Outside Transaction
+
+* Webhook events are stored before sending
+* Guarantees no data loss
+* Prevents external calls from blocking database operations
+
+---
+
+## Failure Handling
+
+### Situation 1 — Webhook Timeout
+
+**Problem:**
+Order is saved but webhook fails or times out
+
+**Solution:**
+
+* Webhook event is stored before sending (outbox pattern)
+* Failed events remain in the database (`FAILED` or `PENDING`)
+* Background retry mechanism ensures eventual delivery
+* Duplicate prevention:
+
+  * `UNIQUE(order_id)` ensures one event per order
+  * `orderId` acts as idempotency key
+
+---
+
+### Situation 2 — Partner Missed Events
+
+**Problem:**
+Webhook returned success but partner missed events
+
+**Solution:**
+
+* All webhook events are persisted in the database
+* Acts as a source of truth
+* Events can be replayed:
+
+  * Query by time range or status
+  * Re-send webhook requests
+* Idempotency ensures safe reprocessing
+
+---
+
+### Situation 3 — Duplicate Delivery Risk
+
+**Problem:**
+Webhook processed by partner but system retries due to crash
+
+**Solution:**
+
+* Use `orderId` as idempotency key
+* Partner deduplicates based on this key
+* System ensures one event per order using:
+
+  ```sql
+  UNIQUE(order_id)
+  ```
+* Retries resend same payload → safe for partner
+
+---
+
+## Flow (End-to-End)
+
+```text
+User places order
+        ↓
+Start DB transaction
+        ↓
+Validate coupon (lock row)
+        ↓
+Mark coupon as used
+        ↓
+Create order
+        ↓
+Insert webhook event (PENDING)
+        ↓
+Commit transaction
+        ↓
+Send webhook
+        ↓
+Update status (SUCCESS / FAILED)
+        ↓
+Retry if FAILED
+```
+
+---
+
+## Results
+
+* Ensures atomic order processing
+* Handles external failures safely
+* Guarantees eventual webhook delivery
+* Prevents duplication using idempotency
+
+The system is designed to remain consistent and reliable under real-world failure conditions.
+
+---
+
+## Part 3 - Demo Videos
+
+**Successful Order + Webhook Success**
+https://drive.google.com/file/d/1gVWmF5-bwRW43MilwQcwDqPjfFJdQpVp/view?usp=sharing
+
+**Coupon Validation Case**
+https://drive.google.com/file/d/15MFF_ltnM9ZHJSEIPZ9ICRTz8lw6wblq/view?usp=sharing
+
+**Webhook Failure Handling**
+https://drive.google.com/file/d/1LeEaAkSCN93dQxD4g3lXnPx30XtcZF36/view?usp=sharing
+
+**Retry Mechanism (Mock Server)**
+https://drive.google.com/file/d/134-Cnp1ZAEK1lQCzCnCG5u01hfS_2OZ6/view?usp=sharing
 
